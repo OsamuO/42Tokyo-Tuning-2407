@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::fs;
+use std::io::Cursor;
 use actix_web::web::Bytes;
 use image::imageops::FilterType;
 use image::io::Reader as ImageReader;
@@ -176,9 +177,10 @@ impl<T: AuthRepository + std::fmt::Debug> AuthService<T> {
         let resized_img = img.resize(500, 500, FilterType::Lanczos3);
 
         // バッファに書き込む
-        let mut buffer = Vec::new();
+        let mut buffer = Cursor::new(Vec::new());
         match resized_img.write_to(&mut buffer, image::ImageOutputFormat::Png) {
             Ok(_) => {
+                let buffer = buffer.into_inner();
                 // リサイズ画像をキャッシュ
                 fs::write(&resized_path, &buffer).map_err(|_| AppError::InternalServerError)?;
                 Ok(Bytes::from(buffer))
