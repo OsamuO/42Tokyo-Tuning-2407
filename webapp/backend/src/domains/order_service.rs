@@ -1,4 +1,6 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
+use sqlx::mysql::MySqlPool;
+use crate::domains::dto::order::OrderWithDetails; 
 
 use super::{
     auth_service::AuthRepository,
@@ -42,6 +44,7 @@ pub trait OrderRepository {
         completed_time: DateTime<Utc>,
     ) -> Result<(), AppError>;
     async fn get_all_completed_orders(&self) -> Result<Vec<CompletedOrder>, AppError>;
+    fn get_pool(&self) -> &MySqlPool;
 }
 
 #[derive(Debug)]
@@ -84,88 +87,41 @@ impl<
             .await
     }
 
-    pub async fn get_order_by_id(&self, id: i32) -> Result<OrderDto, AppError> {
-        let order = self.order_repository.find_order_by_id(id).await?;
+    pub async fn find_order_with_details_by_id(&self, id: i32) -> Result<OrderWithDetails, AppError> {
+        let order_with_details = sqlx::query_as!(
+            OrderWithDetails,
+            r#"
+            SELECT 
+                o.id,
+                o.client_id,
+                c.username AS client_username,
+                o.dispatcher_id,
+                d.user_id AS dispatcher_user_id,
+                du.username AS dispatcher_username,
+                o.tow_truck_id,
+                t.driver_id AS driver_user_id,
+                tu.username AS driver_username,
+                o.node_id,
+                n.area_id, 
+                o.car_value,
+                o.status,
+                o.order_time AS "order_time: NaiveDateTime",
+                o.completed_time AS "completed_time: NaiveDateTime"
+            FROM orders o
+            LEFT JOIN users c ON o.client_id = c.id
+            LEFT JOIN dispatchers d ON o.dispatcher_id = d.id
+            LEFT JOIN users du ON d.user_id = du.id
+            LEFT JOIN tow_trucks t ON o.tow_truck_id = t.id
+            LEFT JOIN users tu ON t.driver_id = tu.id
+            JOIN nodes n ON o.node_id = n.id
+            WHERE o.id = ?
+            "#,
+            id
+        )
+        .fetch_one(self.order_repository.get_pool()) // order_repositoryのpoolを使用
+        .await?;
 
-        let client_username = self
-            .auth_repository
-            .find_user_by_id(order.client_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .username;
-
-        let dispatcher = match order.dispatcher_id {
-            Some(dispatcher_id) => self
-                .auth_repository
-                .find_dispatcher_by_id(dispatcher_id)
-                .await
-                .unwrap(),
-            None => None,
-        };
-
-        let (dispatcher_user_id, dispatcher_username) = match dispatcher {
-            Some(dispatcher) => (
-                Some(dispatcher.user_id),
-                Some(
-                    self.auth_repository
-                        .find_user_by_id(dispatcher.user_id)
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .username,
-                ),
-            ),
-            None => (None, None),
-        };
-
-        let tow_truck = match order.tow_truck_id {
-            Some(tow_truck_id) => self
-                .tow_truck_repository
-                .find_tow_truck_by_id(tow_truck_id)
-                .await
-                .unwrap(),
-            None => None,
-        };
-
-        let (driver_user_id, driver_username) = match tow_truck {
-            Some(tow_truck) => (
-                Some(tow_truck.driver_id),
-                Some(
-                    self.auth_repository
-                        .find_user_by_id(tow_truck.driver_id)
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .username,
-                ),
-            ),
-            None => (None, None),
-        };
-
-        let area_id = self
-            .map_repository
-            .get_area_id_by_node_id(order.node_id)
-            .await
-            .unwrap();
-
-        Ok(OrderDto {
-            id: order.id,
-            client_id: order.client_id,
-            client_username: Some(client_username),
-            dispatcher_user_id,
-            dispatcher_username,
-            driver_user_id,
-            driver_username,
-            area_id,
-            dispatcher_id: order.dispatcher_id,
-            tow_truck_id: order.tow_truck_id,
-            status: order.status,
-            node_id: order.node_id,
-            car_value: order.car_value,
-            order_time: order.order_time,
-            completed_time: order.completed_time,
-        })
+        Ok(order_with_details)
     }
 
     pub async fn get_paginated_orders(

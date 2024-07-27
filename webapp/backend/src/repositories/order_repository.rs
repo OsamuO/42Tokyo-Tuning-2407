@@ -197,4 +197,8 @@ impl OrderRepository for OrderRepositoryImpl {
 
         Ok(orders)
     }
+
+    fn get_pool(&self) -> &MySqlPool {
+        &self.pool
+    }
 }

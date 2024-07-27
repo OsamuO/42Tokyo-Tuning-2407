@@ -38,7 +38,7 @@ pub async fn get_order_handler(
     >,
     path: web::Path<i32>,
 ) -> Result<HttpResponse, AppError> {
-    match service.get_order_by_id(path.into_inner()).await {
+    match service.find_order_with_details_by_id(path.into_inner()).await {
         Ok(order) => Ok(HttpResponse::Ok().json(order)),
         Err(err) => Err(err),
     }
