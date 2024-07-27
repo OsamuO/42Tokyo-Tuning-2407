@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
+use std::fs;
 use actix_web::web::Bytes;
+use image::imageops::FilterType;
+use image::io::Reader as ImageReader;
 use log::error;
 
 use crate::errors::AppError;
@@ -11,25 +12,17 @@ use crate::utils::{generate_session_token, hash_password, verify_password};
 use super::dto::auth::LoginResponseDto;
 
 pub trait AuthRepository {
-    async fn create_user(&self, username: &str, password: &str, role: &str)
-        -> Result<(), AppError>;
+    async fn create_user(&self, username: &str, password: &str, role: &str) -> Result<(), AppError>;
     async fn find_user_by_id(&self, id: i32) -> Result<Option<User>, AppError>;
     async fn find_user_by_username(&self, username: &str) -> Result<Option<User>, AppError>;
     async fn create_dispatcher(&self, user_id: i32, area_id: i32) -> Result<(), AppError>;
     async fn find_dispatcher_by_id(&self, id: i32) -> Result<Option<Dispatcher>, AppError>;
-    async fn find_dispatcher_by_user_id(
-        &self,
-        user_id: i32,
-    ) -> Result<Option<Dispatcher>, AppError>;
-    async fn find_profile_image_name_by_user_id(
-        &self,
-        user_id: i32,
-    ) -> Result<Option<String>, AppError>;
+    async fn find_dispatcher_by_user_id(&self, user_id: i32) -> Result<Option<Dispatcher>, AppError>;
+    async fn find_profile_image_name_by_user_id(&self, user_id: i32) -> Result<Option<String>, AppError>;
     async fn authenticate_user(&self, username: &str, password: &str) -> Result<User, AppError>;
     async fn create_session(&self, user_id: i32, session_token: &str) -> Result<(), AppError>;
     async fn delete_session(&self, session_token: &str) -> Result<(), AppError>;
-    async fn find_session_by_session_token(&self, session_token: &str)
-        -> Result<Session, AppError>;
+    async fn find_session_by_session_token(&self, session_token: &str) -> Result<Session, AppError>;
 }
 
 #[derive(Debug)]
@@ -164,27 +157,34 @@ impl<T: AuthRepository + std::fmt::Debug> AuthService<T> {
             Err(_) => return Err(AppError::NotFound),
         };
 
-        let path: PathBuf =
-            Path::new(&format!("images/user_profile/{}", profile_image_name)).to_path_buf();
+        let original_path: PathBuf = Path::new(&format!("images/user_profile/{}", profile_image_name)).to_path_buf();
+        let resized_path: PathBuf = Path::new(&format!("images/user_profile/resized_500x500_{}", profile_image_name)).to_path_buf();
 
-        let output = Command::new("magick")
-            .arg(&path)
-            .arg("-resize")
-            .arg("500x500")
-            .arg("png:-")
-            .output()
-            .map_err(|e| {
-                error!("画像リサイズのコマンド実行に失敗しました: {:?}", e);
-                AppError::InternalServerError
-            })?;
+        // キャッシュされたリサイズ画像が存在するか確認
+        if resized_path.exists() {
+            let bytes = fs::read(&resized_path).map_err(|_| AppError::InternalServerError)?;
+            return Ok(Bytes::from(bytes));
+        }
 
-        match output.status.success() {
-            true => Ok(Bytes::from(output.stdout)),
-            false => {
-                error!(
-                    "画像リサイズのコマンド実行に失敗しました: {:?}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
+        // 画像ファイルの読み込み
+        let img = match ImageReader::open(&original_path) {
+            Ok(reader) => reader.decode().map_err(|_| AppError::InternalServerError)?,
+            Err(_) => return Err(AppError::NotFound),
+        };
+
+        // 画像のリサイズ
+        let resized_img = img.resize(500, 500, FilterType::Lanczos3);
+
+        // バッファに書き込む
+        let mut buffer = Vec::new();
+        match resized_img.write_to(&mut buffer, image::ImageOutputFormat::Png) {
+            Ok(_) => {
+                // リサイズ画像をキャッシュ
+                fs::write(&resized_path, &buffer).map_err(|_| AppError::InternalServerError)?;
+                Ok(Bytes::from(buffer))
+            }
+            Err(_) => {
+                error!("画像の書き込みに失敗しました");
                 Err(AppError::InternalServerError)
             }
         }
