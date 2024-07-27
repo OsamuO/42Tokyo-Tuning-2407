@@ -15,6 +15,7 @@ use repositories::auth_repository::AuthRepositoryImpl;
 use repositories::map_repository::MapRepositoryImpl;
 use repositories::order_repository::OrderRepositoryImpl;
 use repositories::tow_truck_repository::TowTruckRepositoryImpl;
+use num_cpus;
 
 mod api;
 mod domains;
@@ -152,7 +153,7 @@ async fn main() -> std::io::Result<()> {
             )
     })
     .bind(format!("0.0.0.0:{port}"))?
-    .workers(1)
+    .workers(num_cpus::get())
     .run()
     .await
 }
