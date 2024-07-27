@@ -342,6 +342,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "log",
+ "num_cpus",
  "rand",
  "serde",
  "sqlx",
