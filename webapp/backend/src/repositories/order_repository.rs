@@ -1,6 +1,6 @@
 use crate::domains::order_service::OrderRepository;
 use crate::errors::AppError;
-use crate::models::order::{CompletedOrder, Order};
+use crate::models::order::{CompletedOrder, Order, OrderWithDetails};
 use chrono::{DateTime, Utc};
 use sqlx::mysql::MySqlPool;
 
@@ -50,7 +50,7 @@ impl OrderRepository for OrderRepositoryImpl {
         sort_order: Option<String>,
         status: Option<String>,
         area: Option<i32>,
-    ) -> Result<Vec<Order>, AppError> {
+    ) -> Result<Vec<OrderWithDetails>, AppError> {
         let offset = page * page_size;
         let order_clause = format!(
             "ORDER BY {} {}",
@@ -78,29 +78,43 @@ impl OrderRepository for OrderRepositoryImpl {
             "SELECT 
                 o.id, 
                 o.client_id, 
+                c.username AS client_name,
                 o.dispatcher_id, 
+                d.user_id AS dispatcher_user_id,
+                du.username AS dispatcher_user_name,
                 o.tow_truck_id, 
+                tt.driver_id AS driver_user_id,
+                tu.username AS driver_user_name,
                 o.status, 
                 o.node_id, 
+                n.area_id,
                 o.car_value, 
-                o.order_time, 
+                o.order_time,
                 o.completed_time
             FROM
                 orders o
             JOIN
-                nodes n
-            ON 
-                o.node_id = n.id
-            {} 
-            {} 
-            LIMIT ? 
+                nodes n ON o.node_id = n.id
+            JOIN
+                users c ON o.client_id = c.id
+            LEFT JOIN
+                dispatchers d ON o.dispatcher_id = d.id
+            LEFT JOIN
+                users du ON d.user_id = du.id
+            LEFT JOIN
+                tow_trucks tt ON o.tow_truck_id = tt.id
+            LEFT JOIN
+                users tu ON tt.driver_id = tu.id
+            {}
+            {}
+            LIMIT ?
             OFFSET ?",
             where_clause, order_clause
         );
 
         let orders = match (status, area) {
             (Some(status), Some(area)) => {
-                sqlx::query_as::<_, Order>(&sql)
+                sqlx::query_as::<_, OrderWithDetails>(&sql)
                     .bind(status)
                     .bind(area)
                     .bind(page_size)
@@ -109,7 +123,7 @@ impl OrderRepository for OrderRepositoryImpl {
                     .await?
             }
             (None, Some(area)) => {
-                sqlx::query_as::<_, Order>(&sql)
+                sqlx::query_as::<_, OrderWithDetails>(&sql)
                     .bind(area)
                     .bind(page_size)
                     .bind(offset)
@@ -117,7 +131,7 @@ impl OrderRepository for OrderRepositoryImpl {
                     .await?
             }
             (Some(status), None) => {
-                sqlx::query_as::<_, Order>(&sql)
+                sqlx::query_as::<_, OrderWithDetails>(&sql)
                     .bind(status)
                     .bind(page_size)
                     .bind(offset)
@@ -125,7 +139,7 @@ impl OrderRepository for OrderRepositoryImpl {
                     .await?
             }
             _ => {
-                sqlx::query_as::<_, Order>(&sql)
+                sqlx::query_as::<_, OrderWithDetails>(&sql)
                     .bind(page_size)
                     .bind(offset)
                     .fetch_all(&self.pool)
@@ -135,6 +149,7 @@ impl OrderRepository for OrderRepositoryImpl {
 
         Ok(orders)
     }
+
 
     async fn create_order(
         &self,
