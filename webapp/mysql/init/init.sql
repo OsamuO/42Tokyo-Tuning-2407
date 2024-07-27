@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     id INT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(255) NOT NULL,
     password VARCHAR(255) NOT NULL DEFAULT '$argon2id$v=19$m=19456,t=2,p=1$XATPp8QqqTtg3VrdJ/QPfw$r3o9L6zWQc/Zq70GbP33Gl9N50jGUSMMvYcl7M05ukw',
-    profile_image VARCHAR(255) NOT NULL DEFAULT 'default.jpg',
+    profile_image VARCHAR(255) NOT NULL DEFAULT 'default_compressed.png',
     role VARCHAR(255) NOT NULL
 );
 
