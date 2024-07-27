@@ -1,181 +1,163 @@
 use std::path::{Path, PathBuf};
-use std::fs;
-use std::io::Cursor;
-use std::sync::Arc;
 use actix_web::web::Bytes;
-use image::imageops::FilterType;
-use image::io::Reader as ImageReader;
-use log::{error, info};
-use redis::AsyncCommands;
-use tokio::task;
-use async_trait::async_trait;
-use serde::{Serialize, Deserialize};
+use log::error;
 use crate::errors::AppError;
 use crate::models::user::{Dispatcher, Session, User};
 use crate::utils::{generate_session_token, hash_password, verify_password};
-use crate::cache::RedisClient;
 use super::dto::auth::LoginResponseDto;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use image::{self, ImageOutputFormat};
+use tokio::task;
+use std::fs::File;
+use std::io::Cursor;
+use image::ImageOutputFormat;
 
-#[async_trait]
-pub trait AuthRepository: Send + Sync {
-    async fn create_user(&self, username: &str, password: &str, role: &str) -> Result<User, AppError>;
+
+lazy_static! {
+    static ref IMAGE_CACHE: Mutex<HashMap<i32, Bytes>> = Mutex::new(HashMap::new());
+}
+
+pub trait AuthRepository {
+    async fn create_user(&self, username: &str, password: &str, role: &str) -> Result<(), AppError>;
+    async fn find_user_by_id(&self, id: i32) -> Result<Option<User>, AppError>;
     async fn find_user_by_username(&self, username: &str) -> Result<Option<User>, AppError>;
-    async fn create_dispatcher(&self, user_id: i32, area_id: i32) -> Result<Dispatcher, AppError>;
+    async fn create_dispatcher(&self, user_id: i32, area_id: i32) -> Result<(), AppError>;
+    async fn find_dispatcher_by_id(&self, id: i32) -> Result<Option<Dispatcher>, AppError>;
     async fn find_dispatcher_by_user_id(&self, user_id: i32) -> Result<Option<Dispatcher>, AppError>;
     async fn find_profile_image_name_by_user_id(&self, user_id: i32) -> Result<Option<String>, AppError>;
+    async fn authenticate_user(&self, username: &str, password: &str) -> Result<User, AppError>;
     async fn create_session(&self, user_id: i32, session_token: &str) -> Result<(), AppError>;
     async fn delete_session(&self, session_token: &str) -> Result<(), AppError>;
     async fn find_session_by_session_token(&self, session_token: &str) -> Result<Session, AppError>;
 }
 
-pub struct AuthService<T: AuthRepository> {
-    repository: Arc<T>,
-    redis_client: Arc<RedisClient>,
+#[derive(Debug)]
+pub struct AuthService<T: AuthRepository + std::fmt::Debug> {
+    repository: T,
 }
 
-impl<T: AuthRepository> AuthService<T> {
-    pub fn new(repository: T, redis_client: RedisClient) -> Self {
-        AuthService {
-            repository: Arc::new(repository),
-            redis_client: Arc::new(redis_client),
-        }
+impl<T: AuthRepository + std::fmt::Debug> AuthService<T> {
+    pub fn new(repository: T) -> Self {
+        AuthService { repository }
     }
 
     pub async fn register_user(&self, username: &str, password: &str, role: &str, area: Option<i32>) -> Result<LoginResponseDto, AppError> {
         if role == "dispatcher" && area.is_none() {
-            return Err(AppError::BadRequest("Area is required for dispatcher role".into()));
+            return Err(AppError::BadRequest);
         }
 
-        if let Some(_) = self.repository.find_user_by_username(username).await? {
-            return Err(AppError::Conflict("Username already exists".into()));
+        if (self.repository.find_user_by_username(username).await?).is_some() {
+            return Err(AppError::Conflict);
         }
 
-        let hashed_password = hash_password(password)?;
-        let user = self.repository.create_user(username, &hashed_password, role).await?;
-
+        let hashed_password = hash_password(password).unwrap();
+        self.repository.create_user(username, &hashed_password, role).await?;
         let session_token = generate_session_token();
-        self.repository.create_session(user.id, &session_token).await?;
 
-        let login_response = match role {
-            "dispatcher" => {
-                let dispatcher = self.repository.create_dispatcher(user.id, area.unwrap()).await?;
-                LoginResponseDto {
-                    user_id: user.id,
-                    username: user.username,
-                    session_token,
-                    role: user.role,
-                    dispatcher_id: Some(dispatcher.id),
-                    area_id: Some(dispatcher.area_id),
+        match self.repository.find_user_by_username(username).await? {
+            Some(user) => {
+                self.repository.create_session(user.id, &session_token).await?;
+                match user.role.as_str() {
+                    "dispatcher" => {
+                        self.repository.create_dispatcher(user.id, area.unwrap()).await?;
+                        let dispatcher = self.repository.find_dispatcher_by_user_id(user.id).await?.unwrap();
+                        Ok(LoginResponseDto {
+                            user_id: user.id,
+                            username: user.username,
+                            session_token,
+                            role: user.role,
+                            dispatcher_id: Some(dispatcher.id),
+                            area_id: Some(dispatcher.area_id),
+                        })
+                    }
+                    _ => Ok(LoginResponseDto {
+                        user_id: user.id,
+                        username: user.username,
+                        session_token,
+                        role: user.role,
+                        dispatcher_id: None,
+                        area_id: None,
+                    }),
                 }
             }
-            _ => LoginResponseDto {
-                user_id: user.id,
-                username: user.username,
-                session_token,
-                role: user.role,
-                dispatcher_id: None,
-                area_id: None,
-            },
-        };
-
-        // Cache user session
-        self.cache_session(&session_token, &login_response).await?;
-
-        Ok(login_response)
+            None => Err(AppError::InternalServerError),
+        }
     }
 
     pub async fn login_user(&self, username: &str, password: &str) -> Result<LoginResponseDto, AppError> {
-        let user = self.repository.find_user_by_username(username).await?
-            .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
+        match self.repository.find_user_by_username(username).await? {
+            Some(user) => {
+                let is_password_valid = verify_password(&user.password, password).unwrap();
+                if !is_password_valid {
+                    return Err(AppError::Unauthorized);
+                }
 
-        if !verify_password(&user.password, password)? {
-            return Err(AppError::Unauthorized("Invalid credentials".into()));
-        }
+                let session_token = generate_session_token();
+                self.repository.create_session(user.id, &session_token).await?;
 
-        let session_token = generate_session_token();
-        self.repository.create_session(user.id, &session_token).await?;
-
-        let login_response = match user.role.as_str() {
-            "dispatcher" => {
-                let dispatcher = self.repository.find_dispatcher_by_user_id(user.id).await?
-                    .ok_or_else(|| AppError::InternalServerError("Dispatcher not found".into()))?;
-                LoginResponseDto {
-                    user_id: user.id,
-                    username: user.username,
-                    session_token,
-                    role: user.role,
-                    dispatcher_id: Some(dispatcher.id),
-                    area_id: Some(dispatcher.area_id),
+                match user.role.as_str() {
+                    "dispatcher" => {
+                        match self.repository.find_dispatcher_by_user_id(user.id).await? {
+                            Some(dispatcher) => Ok(LoginResponseDto {
+                                user_id: user.id,
+                                username: user.username,
+                                session_token,
+                                role: user.role.clone(),
+                                dispatcher_id: Some(dispatcher.id),
+                                area_id: Some(dispatcher.area_id),
+                            }),
+                            None => Err(AppError::InternalServerError),
+                        }
+                    }
+                    _ => Ok(LoginResponseDto {
+                        user_id: user.id,
+                        username: user.username,
+                        session_token,
+                        role: user.role.clone(),
+                        dispatcher_id: None,
+                        area_id: None,
+                    }),
                 }
             }
-            _ => LoginResponseDto {
-                user_id: user.id,
-                username: user.username,
-                session_token,
-                role: user.role,
-                dispatcher_id: None,
-                area_id: None,
-            },
-        };
-
-        // Cache user session
-        self.cache_session(&session_token, &login_response).await?;
-
-        Ok(login_response)
+            None => Err(AppError::Unauthorized),
+        }
     }
 
     pub async fn logout_user(&self, session_token: &str) -> Result<(), AppError> {
         self.repository.delete_session(session_token).await?;
-        self.redis_client.del::<String, ()>(session_token).await?;
         Ok(())
     }
 
     pub async fn get_resized_profile_image_byte(&self, user_id: i32) -> Result<Bytes, AppError> {
-        let profile_image_name = self.repository.find_profile_image_name_by_user_id(user_id).await?
-            .ok_or_else(|| AppError::NotFound("Profile image not found".into()))?;
+    let profile_image_name = match self
+        .repository
+        .find_profile_image_name_by_user_id(user_id)
+        .await
+    {
+        Ok(Some(name)) => name,
+        Ok(None) => return Err(AppError::NotFound),
+        Err(_) => return Err(AppError::NotFound),
+    };
 
-        let path: PathBuf = Path::new(&format!("images/user_profile/{}", profile_image_name)).to_path_buf();
+    let path: PathBuf = Path::new(&format!("images/user_profile/{}", profile_image_name)).to_path_buf();
 
-        let img_bytes = tokio::fs::read(&path).await
-            .map_err(|e| AppError::InternalServerError(format!("Failed to read image file: {}", e)))?;
+    // ファイルを開く
+    let img = image::open(&path).map_err(|e| {
+        error!("画像の読み込みに失敗しました: {:?}", e);
+        AppError::InternalServerError
+    })?;
 
-        let resized_img = task::spawn_blocking(move || -> Result<Vec<u8>, image::ImageError> {
-            let img = image::load_from_memory(&img_bytes)?;
-            let resized = img.resize(500, 500, image::imageops::FilterType::Lanczos3);
-            let mut buffer = Cursor::new(Vec::new());
-            resized.write_to(&mut buffer, image::ImageOutputFormat::Png)?;
-            Ok(buffer.into_inner())
-        }).await
-        .map_err(|e| AppError::InternalServerError(format!("Image processing task failed: {}", e)))?
-        .map_err(|e| AppError::InternalServerError(format!("Image processing failed: {}", e)))?;
+    // リサイズ
+    let resized_img = img.resize(500, 500, image::imageops::FilterType::Lanczos3);
 
-        Ok(Bytes::from(resized_img))
-    }
+    // PNG形式でバイト配列に変換
+    let mut buffer = Vec::new();
+    resized_img.write_to(&mut Cursor::new(&mut buffer), ImageOutputFormat::Png).map_err(|e| {
+        error!("画像の書き込みに失敗しました: {:?}", e);
+        AppError::InternalServerError
+    })?;
 
-    pub async fn validate_session(&self, session_token: &str) -> Result<bool, AppError> {
-        if let Ok(session) = self.get_cached_session(session_token).await {
-            return Ok(true);
-        }
-
-        let session = self.repository.find_session_by_session_token(session_token).await?;
-        Ok(session.is_valid)
-    }
-
-    async fn cache_session(&self, session_token: &str, login_response: &LoginResponseDto) -> Result<(), AppError> {
-        let serialized = serde_json::to_string(login_response)
-            .map_err(|e| AppError::InternalServerError(format!("Failed to serialize session: {}", e)))?;
-        
-        self.redis_client.set_ex(session_token, &serialized, 3600).await
-            .map_err(|e| AppError::InternalServerError(format!("Failed to cache session: {}", e)))?;
-        
-        Ok(())
-    }
-
-    async fn get_cached_session(&self, session_token: &str) -> Result<LoginResponseDto, AppError> {
-        let serialized: String = self.redis_client.get(session_token).await
-            .map_err(|e| AppError::InternalServerError(format!("Failed to get cached session: {}", e)))?;
-        
-        serde_json::from_str(&serialized)
-            .map_err(|e| AppError::InternalServerError(format!("Failed to deserialize session: {}", e)))
+    Ok(Bytes::from(buffer))
     }
 }
