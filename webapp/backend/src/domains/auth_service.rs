@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use actix_web::web::Bytes;
+use actix_web::web::Bytes as ActixBytes;
 use log::error;
 
 use crate::errors::AppError;
@@ -9,6 +8,12 @@ use crate::models::user::{Dispatcher, Session, User};
 use crate::utils::{generate_session_token, hash_password, verify_password};
 
 use super::dto::auth::LoginResponseDto;
+
+use image::imageops::FilterType;
+use image::{io::Reader as ImageReader, ImageOutputFormat};
+use std::io::Cursor;
+use cached::proc_macro::cached;
+use actix_web::rt::task; 
 
 pub trait AuthRepository {
     async fn create_user(&self, username: &str, password: &str, role: &str)
@@ -30,6 +35,32 @@ pub trait AuthRepository {
     async fn delete_session(&self, session_token: &str) -> Result<(), AppError>;
     async fn find_session_by_session_token(&self, session_token: &str)
         -> Result<Session, AppError>;
+}
+
+// キャッシュを使ってリサイズされた画像を保存
+#[cached(time = 600, result = true, sync_writes = true)]
+async fn resize_image(path: PathBuf) -> Result<ActixBytes, AppError> {
+    // 画像を読み込む
+    let img = task::spawn_blocking(move || {
+        let img = ImageReader::open(&path)?.decode();
+        img.map_err(|e| AppError::from(e))
+    }).await.map_err(|e| {
+        error!("画像の読み込みに失敗しました: {:?}", e);
+        AppError::InternalServerError
+    })??;
+
+    // 画像をリサイズする
+    let resized_img = img.resize(500, 500, FilterType::Lanczos3);
+
+    // PNG形式に変換してバイト列にする
+    let mut buffer = Vec::new();
+    match resized_img.write_to(&mut Cursor::new(&mut buffer), ImageOutputFormat::Png) {
+        Ok(_) => Ok(ActixBytes::from(buffer)),
+        Err(e) => {
+            error!("画像の書き込みに失敗しました: {:?}", e);
+            Err(AppError::InternalServerError)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -153,7 +184,7 @@ impl<T: AuthRepository + std::fmt::Debug> AuthService<T> {
         Ok(())
     }
 
-    pub async fn get_resized_profile_image_byte(&self, user_id: i32) -> Result<Bytes, AppError> {
+    pub async fn get_resized_profile_image_byte(&self, user_id: i32) -> Result<ActixBytes, AppError> {
         let profile_image_name = match self
             .repository
             .find_profile_image_name_by_user_id(user_id)
@@ -164,30 +195,10 @@ impl<T: AuthRepository + std::fmt::Debug> AuthService<T> {
             Err(_) => return Err(AppError::NotFound),
         };
 
-        let path: PathBuf =
-            Path::new(&format!("images/user_profile/{}", profile_image_name)).to_path_buf();
+        let path: PathBuf = Path::new(&format!("images/user_profile/{}", profile_image_name)).to_path_buf();
 
-        let output = Command::new("magick")
-            .arg(&path)
-            .arg("-resize")
-            .arg("500x500")
-            .arg("png:-")
-            .output()
-            .map_err(|e| {
-                error!("画像リサイズのコマンド実行に失敗しました: {:?}", e);
-                AppError::InternalServerError
-            })?;
-
-        match output.status.success() {
-            true => Ok(Bytes::from(output.stdout)),
-            false => {
-                error!(
-                    "画像リサイズのコマンド実行に失敗しました: {:?}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                Err(AppError::InternalServerError)
-            }
-        }
+        // キャッシュされたリサイズ済み画像を取得
+        resize_image(path).await
     }
 
     pub async fn validate_session(&self, session_token: &str) -> Result<bool, AppError> {
@@ -197,5 +208,20 @@ impl<T: AuthRepository + std::fmt::Debug> AuthService<T> {
             .await?;
 
         Ok(session.is_valid)
+    }
+}
+
+// AppError に ImageError および std::io::Error の From トレイトを実装
+use image::ImageError;
+use std::io;
+impl From<ImageError> for AppError {
+    fn from(_: ImageError) -> Self {
+        AppError::InternalServerError
+    }
+}
+
+impl From<io::Error> for AppError {
+    fn from(_: io::Error) -> Self {
+        AppError::InternalServerError
     }
 }
