@@ -23,6 +23,7 @@ num_cpus = "1.16.0"
 image = "0.24.3"
 bytes = "1.0"
 cached = "0.36"
+bcrypt = "0.15.1"
 
 [build-dependencies]
 syn = "1"

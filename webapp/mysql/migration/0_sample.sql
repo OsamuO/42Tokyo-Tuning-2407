@@ -5,3 +5,5 @@ ALTER TABLE users
 CREATE INDEX idx_users_username ON users (username);
 
 CREATE INDEX idx_sessions_session_token ON sessions (session_token);
+
+UPDATE users SET password = '$2y$12$XebT7fCpov1BN89cvZ7L7eUol4J1TemlL1OzeC423.0nCwKyAUA/O';
