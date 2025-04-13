@@ -100,30 +100,24 @@ impl<
             graph.add_edge(edge);
         }
 
-        let sorted_tow_trucks_by_distance = {
-            let mut tow_trucks_with_distance: Vec<_> = tow_trucks
-                .into_iter()
-                .map(|truck| {
-                    let distance = calculate_distance(&graph, truck.node_id, order.node_id);
-                    (distance, truck)
-                })
-                .collect();
+        let mut nearest_tow_truck: Option<(f64, TowTruck)> = None;
 
-            tow_trucks_with_distance.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            tow_trucks_with_distance
-        };
-
-        if sorted_tow_trucks_by_distance.is_empty() || sorted_tow_trucks_by_distance[0].0 > 10000000
-        {
-            return Ok(None);
+        for truck in tow_trucks {
+            let distance = calculate_distance(&graph, truck.node_id, order.node_id) as f64;
+            if nearest_tow_truck.is_none() || distance < nearest_tow_truck.as_ref().unwrap().0 {
+                nearest_tow_truck = Some((distance, truck));
+            }
         }
 
-        let sorted_tow_truck_dtos: Vec<TowTruckDto> = sorted_tow_trucks_by_distance
-            .into_iter()
-            .map(|(_, truck)| TowTruckDto::from_entity(truck))
-            .collect();
+        if let Some((distance, truck)) = nearest_tow_truck {
+            if distance > 10000000.0 {
+                return Ok(None);
+            }
+            let tow_truck_dto = TowTruckDto::from_entity(truck);
+            return Ok(Some(tow_truck_dto));
+        }
 
-        Ok(sorted_tow_truck_dtos.first().cloned())
+        Ok(None)
     }
 }
 
