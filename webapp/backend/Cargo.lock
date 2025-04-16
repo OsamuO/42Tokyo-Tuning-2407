@@ -368,6 +368,7 @@ dependencies = [
  "sqlx",
  "syn 1.0.109",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
